@@ -1,0 +1,619 @@
+' **** YOU MUST EDIT BELOW FOR THIS TO WORK
+Option Explicit
+'Dim variables and use Option Explicit.  This is a best practice, 
+'and makes debugging misspelled variables much, much easier..
+
+Dim bDebug, bNotify, bCSV, bVerbose, bAnnoy, aAlwaysBeep
+Dim strSubject, strBody, strTo, strFrom
+Dim strTestEmail, aIgnoreList, message
+Set objNet = CreateObject("Wscript.Network")
+strComputer = objNet.Computername
+Dim  strDrive
+dim fso
+Set fso = CreateObject("Scripting.FileSystemObject")
+Dim dExceptions                   ' Create a dictionary.
+Set dExceptions = CreateObject("Scripting.Dictionary")
+dim ExcludeNames, PNPIDs, strModel
+Const TextCompare = 1
+dExceptions.CompareMode = TextCompare
+Dim dLastTime: dLastTime= "3/10/2026 12:32" 'arbitrary time in the past
+Dim bSkipAdmins, bExitIfServer, strSite
+dim bReportSanctuary, bSanctuaryBail
+
+' ****** ======== EDITING REQUIRED HERE  ====== ******
+'if bDebug True messages echo showing postion in code.  
+'Debug is for testing, DO NOT DEPLY WITH THIS SET TO TRUE! 
+bDebug = False
+
+'Don't run if user has admin rights on computer
+'This may not work on post XP OS because of UAC
+bSkipAdmins = False
+
+'if true, script will quit for server OS
+bExitIfServer = True
+
+' Attempt to eject drive, requires usb_Drive_Ejector.exe from 
+'http://quick.mixnmojo.com/usb-disk-ejector in same folder as script.
+bEject = False 
+
+'Bail if end point control software installed
+bSanctuaryBail = False
+
+'Report end point control software state
+bReportSanctuary = False
+
+'SMTP Mail server 
+Const strMailServer = "your mail server"
+
+'Or Single name to get messages, or more than one separated by semi-colon ";"
+strTo = "user@domain.com"
+
+'Who gets mail when bDebug testing
+strTestEmail = "Admin.Name@domain.com"
+
+'Verbose adds Device IDs to email.  Good for creating exclusion list.
+bVerbose = True
+
+'You can use strSite with a select case or if statement to provide 
+'customized messages depending on AD site
+'comment next two lines out if not running in an NT domain
+'Set oSI = CreateObject("ADSystemInfo")
+'strSite = oSI.SiteName
+
+'List of USB Storage devices that will not cause message to be sent
+'Compared against all or part of the the Device ID. No spaces! 
+'These will be ignored for all users and all workstations
+aIgnoreList = Array("FLOPPY","CDROM","CARDREADER","LASERJET","DVR","OFFICEJET")
+
+'Special list of exceptions paired to Computername or UserName CAPS
+'first column is a key, and cannot be duplicated.  
+'dExceptions.Add "PCName", "VEN_FLIP&PROD_VIDEO_CAMCORDER&REV_\PS50001&0"
+'dExceptions.Add "USERNAME", "DEVICE&REV_9339" 
+
+ExcludeNames = dExceptions.Keys
+PNPIDs = dExceptions.items
+
+'From line.  Set an orignation address
+'strFrom = "usbalerts@domain.com
+
+'Default computername@domain.com
+strFrom = strComputer & "@domain.local"
+
+'If true, user gets popup msgbox with warning below
+bNotify = True
+
+'If True, computer beeps until drive removed or dismounted, annoying user
+bAnnoy = True
+
+'list of devices that will always get a beep, even if bAnnoy is false
+aAlwaysBeep = Array("IPOD","GPX&PROD_AUDIO_PLAYER")
+
+'If true then CSV info is added to message to cut and paste into spreadsheet.
+bCSV = True
+
+'Popup warning message
+message =  "       NOTICE!  " & VbCrLf & VbCrLf  &  "The USB device you have inserted violates our security rules. " & _
+"Only company issued USB devices are allowed."
+
+
+' ========== End Edits =======
+'Email Constants do not change!
+Const cdoSendUsingMethod = "http://schemas.microsoft.com/cdo/configuration/sendusing"
+Const cdoSMTPServer = "http://schemas.microsoft.com/cdo/configuration/smtpserver"
+Const cdoSendUsingPort = 25
+Const cdoSMTPServerPort = "http://schemas.microsoft.com/cdo/configuration/smtpserverport"
+Const cdoSMTPConnectionTimeout = "http://schemas.microsoft.com/cdo/configuration/smtpconnectiontimeout"
+'RS Constants do not change
+Const adVarChar = 200
+Const MaxCharacters = 255
+Const adFldIsNullable = 32
+Const adDouble = 5
+
+Dim strComputer, wshShell,objNet
+Dim oWMI, colMonitoredEvents, objLatestEvent, strNTName, strMyName,strMyCSVName, strDescription
+Dim oSI, oRS
+Dim Fields, i
+Set wshShell = WScript.CreateObject("wscript.shell")
+Dim m_objCDO, m_objCDOcon
+Dim colitems, USBItem
+Dim strUSBName, strUSBID, strConnected, iUSBSize, USBNames, USBPNPIDs
+Dim quote
+Dim bEject 
+quote=chr(34)
+
+'Connect to WMI
+Set oWMI = GetObject("winmgmts:\\"& strComputer & "\root\cimv2")
+'Bail if you can't connect to WMI
+If Err <> 0 Then WScript.Quit
+
+Set oWMI = GetObject("winmgmts:\\" & strComputer & "\root\CIMV2")
+Set colItems = oWMI.ExecQuery("SELECT ProductType FROM Win32_OperatingSystem",,48)
+
+Dim objItem, strProductType
+For Each objItem In colItems
+  strProductType = objItem.ProductType
+Next
+
+If bExitIfServer Then
+	If strProductType <> 1 Then WScript.Quit
+End If 
+
+If bSkipAdmins And IsAdmin Then 
+	If bDebug Then WScript.Echo "Exiting, user is administrator"
+	WScript.Quit
+End If 
+
+Dim strServiceMessage, bServiceInstalled
+
+If bSanctuaryBail Then 
+	CheckService "scomc", "Sanctuary"
+	
+	If bServiceInstalled and bSanctuaryBail Then 
+		If bDebug Then WScript.Echo "Exiting, End Point Security Installed"
+		WScript.Quit
+	End If 
+End If 
+
+if bDebug then aIgnoreList = Array("FLOPPY","CDROM")
+
+'ref http://www.devguru.com/Technologies/ado/quickref/record_fieldscollection.html
+
+'create disconnected recordset -- note the ADOR
+Set oRS = CreateObject("ADOR.Recordset")
+oRS.Fields.Append "Model", adVarChar, MaxCharacters, adFldIsNullable
+oRS.Fields.Append "PNPID", adVarChar, MaxCharacters, adFldIsNullable
+oRS.Fields.Append "Size", adDouble, adFldIsNullable
+oRS.Open
+
+If Not IsCScript() and bDebug = True Then 		'debug in CScript
+	WshShell.Run "CScript.exe " & quote & WScript.ScriptFullName & quote 
+    WScript.Quit            				'...and stop running as Wscript
+End If
+
+If IsCScript() and bDebug = False Then 		'If  CScript and not debugging re-run with wscript...
+	WshShell.Run "WScript.exe " & quote & WScript.ScriptFullName & quote 
+    WScript.Quit            				'...and stop running as WScript
+End If
+
+strNTName = objNet.UserName
+GetName
+
+strComputer = uCase(strComputer)
+strNTName =uCase(strNTName)
+
+If dExceptions.Exists(strComputer) or dExceptions.Exists(StrNTName) Then 
+	AddExclude strComputer
+End If 
+
+'Disable error messages...
+If not bdebug then On Error Resume Next
+If bDebug Then WScript.Echo "Debug mode"
+
+CheckNow True 'True means first time run
+CreateSink
+
+Sub CheckNow(bStartup)
+	strConnected = ""
+	strUSBID = ""
+	strUSBName = ""
+	
+	'This runs to pickup devices connected before script started
+	
+	Set colitems = oWMI.ExecQuery("Select model, size, pnpdeviceID from Win32_diskdrive where interfacetype = 'USB' and size > 1")
+	
+	For Each USBItem In colitems
+	
+		If USBItem.pnpdeviceID = strUSBID Then  'Ignore duplicate entries in same detection
+			strUSBName = ""
+		Else
+			strUSBName =  USBItem.model 
+			strUSBID = USBItem.pnpdeviceID
+			iUSBSize = round(USBItem.Size /1024 /1024)
+			
+			For i = 0 To UBound(aIgnoreList)
+				If InStr(ucase(strUSBID),uCase(aIgnoreList(i))) > 0 Then	'avoids type mismatch of binary compare
+					If bDebug Then WScript.Echo "Skipping " &  strUSBID &  " which contains " & aIgnoreList(i)
+					strUSBName = ""
+				End If 
+		Next
+		
+		End If 
+		
+		If len(strUSBName) > 1 Then
+			oRS.AddNew
+		    oRS("Model") = strUSBName
+		    oRS("Size") = iUSBSize
+		    oRS("PNPID") = strUSBID
+		    oRS.Update
+		End If 
+	
+	Next 
+
+	If oRS.RecordCount> 0 Then Notifier strConnected, bStartup
+End Sub 
+
+
+Sub CreateSink()
+	'This runs to look for new insertions of devices.  "Within 5", below is a 5 second check interval
+	
+	Dim strWQL 'Query that creates the sink
+	If bDebug Then Wscript.echo "Creating WMI sink"	
+	
+	strWQL = "SELECT * FROM __InstanceCreationEvent WITHIN 5 WHERE Targetinstance ISA 'Win32_PNPEntity'" & _
+	" and TargetInstance.DeviceId like '%USBSTOR%'"
+	
+	Set colMonitoredEvents = oWMI.ExecNotificationQuery(strWQL) 
+	
+	Do
+		If bDebug Then WScript.Echo "Waiting for events"
+		Set objLatestEvent = colMonitoredEvents.NextEvent
+		CheckNow False
+	Loop
+	
+End Sub 
+
+Sub Notifier(strUSBType,bStartup)
+	If bDebug Then On Error Resume Next
+	If DateDiff("s",dLastTime,Now) <5 Then  
+		if bDebug then WScript.Echo "Skipping notification within 5 seconds of previous" 
+		Exit Sub 
+	End If 
+	
+	if bDebug then Wscript.echo "USB insertion event detected"
+	Dim i		
+	Dim strTime
+	strTime = Time
+	
+	oRS.Sort = "Model"
+	oRS.MoveFirst
+	Do Until oRS.EOF
+		strModel = oRS.Fields.Item("Model")
+		If bVerbose Then 
+			strConnected = strConnected & strModel & ", " & oRS.Fields.Item("size") &" MB,"  & " (" & oRS.Fields.Item("PNPID") & ")" & VbCrLf  
+		Else
+			strConnected = strConnected & strModel & ", " & oRS.Fields.Item("size") &" MB,"  & VbCrLf  
+		End If 
+	oRS.MoveNext
+	Loop
+	
+	If bStartUp = True Then ' initial event
+		strSubject = "USB storage detected at logon onto " & strComputer 
+		strBody = "User " & objNet.Username & strMyName & ", had the following " & oRS.RecordCount& " USB storage device"
+		If oRS.RecordCount> 1 Then strBody = strBody & "s"
+		strBody= strBody & " found connected when monitoring began of " & strComputer & _
+		" at " & strTime & " on " & Date & ":" & VbCrLf & VbCrLf 
+	Else
+		strSubject = "USB storage detected on " & strComputer
+		strBody = "User " & objNet.Username & strMyName & " at " & strTime & " on " & Date & _
+		", connected to " & strComputer & " the following USB storage device:" & VbCrLf
+	End If 
+
+	strBody = strBody & strConnected & VbCrLf & strServiceMessage
+		
+	If bCSV Then 
+		Dim CsvText
+		oRS.MoveFirst
+		Do Until oRS.EOF
+		' Iterate the dict. again for CSV data
+			csvtext  =CsvText  & _
+			Date & "," &  strTime & "," & quote &  objNet.Username & quote & "," &  quote & strMyCSVName &_
+			quote & "," & strComputer & "," & quote & oRS.Fields.Item("Model") & quote & ","  & oRS.Fields.Item("size") & "," & quote & oRS.Fields.Item("PNPID") & quote &  VbCrLf  
+		oRS.MoveNext
+		Loop
+			strBody = strBody & VbCrLf & VbCrLf & String(10,"=") & " CSV DATA " & String(10,"=") & VbCrLf  & CsvText		
+	End If 
+	
+	If bDebug Then strBody = strBody & VbCrLf & VbCrLf & "******* TEST MESSAGE ONLY ********"
+	
+
+	Set m_objCDO = CreateObject("CDO.Message")
+	Set m_objCDOcon = CreateObject("CDO.Configuration")
+	'Setting up Mail
+	'Note that I am relying on a server that does not require authentication
+	'this is because the username/pw would be in plaintext, available to the
+	'user.  You can use authentication -- see CDO docs
+	
+	Set Fields = m_objCDOcon.Fields
+	With Fields
+	   .Item(cdoSendUsingMethod)       = 2
+	   .Item(cdoSMTPServer)            = strMailServer
+	   .Item(cdoSMTPServerPort)        = cdoSendUsingPort
+	   .Item(cdoSMTPConnectionTimeout) = 100   
+	   .Update
+	End With
+	
+	'Passing parameters to message object
+	Set m_objCDO.Configuration = m_objCDOcon
+	
+	If bDebug Then strTo = strTestEmail
+	
+	With m_objCDO
+	    .To       = strTo
+	    .From     = strFrom
+	End With
+
+	m_objCDO.TextBody = strBody
+	m_objCDO.Subject  = strSubject
+	
+	i = 0
+
+	'Retry if fails to send
+    Do
+		If bDebug Then Wscript.echo "Waiting to send mail loop"
+    	Err.Clear
+    	m_objCDO.Send
+    	
+    	if bDebug Then 
+    		If Err <> 0 Then WScript.Echo "Error number: " & Err.Number & VbCrLf & Err.Description
+    	End If  
+		
+		WScript.Sleep 6000				'Wait a minute
+		i = i + 1
+		If Err = -2147220975 Then i = 10
+
+    Loop Until Err.Number = 0 Or i = 10 	'after 10 times bail or untrusted failure
+	
+	If bDebug Then 
+		if  i <> 10 Then 
+			Wscript.echo "Mail sent"
+		Else
+			WScript.Echo "Error sending mail, skipped"
+		End If 
+	End If 
+	
+	Set m_objCDO = Nothing
+	Set m_objCDOcon = Nothing
+	
+	If bNotify Then 
+		WShshell.popup message,60,"Security Violation: " & strModel,vbcritical + vbOKOnly + vbSystemModal
+	End If	
+	
+	strDrive = GetDriveLetter
+
+	'Possible additions here: MoveAll to local drive , Delelete Allfiles, WriteWarning to file
+
+	If bAnnoy Then 	
+		AnnoyUser()
+	Else
+		If UBound(aAlwaysBeep) = 0 Then 	'if nothing in Always beep list, run eject here instead of in AnnoyUser routine.
+			If bEject Then EjectDrive
+		End If 
+		
+		For i = 0 To UBound(aAlwaysBeep)
+			If InStr(ucase(strUSBID),uCase(aAlwaysBeep(i))) > 0 Then	'avoids type mismatch of binary compare
+				AnnoyUser()
+				Exit For 
+			End If 
+		Next
+	End If 
+	
+	'empty
+	oRS.MoveFirst
+	Do While Not oRS.EOF
+	    oRS.Delete
+	    oRS.MoveNext
+	Loop
+	
+	dLastTime = Now()
+	If bDebug Then On Error GoTo 0
+End Sub
+
+
+Sub EjectDrive()
+	'get path name, ending in \
+	Dim scriptpath, strCommand, strExePath
+	scriptpath = Left(Wscript.ScriptFullName, InStrRev(Wscript.ScriptFullName, "\"))
+	strExePath = scriptpath & "USB_Disk_Eject.exe" 
+	
+	If Not fso.FileExists(strExePath) Then
+		If bDebug Then 
+			message = "This function requires USB_Disk_Eject.exe to be in the same folder as the script. " & _
+			"You can download it from http://quick.mixnmojo.com/usb-disk-ejector. Please support the shareware author!"
+			MsgBox message,vbCritical + vbOKOnly,"File not found"
+			WScript.Quit
+		End If 
+		Exit Sub 
+	End If 
+	
+	If fso.DriveExists(strDrive) Then 
+		strcommand = quote &  strExePath  & quote & " /Silent /REMOVELETTER " & strDrive
+		If bDebug Then WScript.Echo strcommand 
+		wshShell.Run strcommand,0,True
+		MsgBox "The " & strModel & " has been disconnected. Please unplug it.",vbCritical + vbokonly,"Drive Dismounted" 
+	End If 
+End Sub 
+
+
+Sub AnnoyUser()
+	Dim iAnnoy, tmpMsg
+	iAnnoy = 0	
+
+	For iAnnoy = 0 To 10	
+		If bDebug Then WScript.Echo "Beep...."
+		If bDebug Then WScript.Echo "Drive is " & strDrive
+		If fso.DriveExists(strDrive) Then 
+			beep 
+			If bEject Then EjectDrive
+		Else
+			Exit Sub
+		End If 
+			
+		If iAnnoy = 10 Then 
+			tmpMsg =  "Beeps will continue until you remove the " & strModel & " from this computer."
+			wshShell.Popup tmpMsg,10,"VIOLATION!",vbCritical+vbOKOnly
+			iAnnoy =0
+		End If
+	Next 
+
+End Sub 
+
+Sub beep()
+	Dim iWait 
+	If bEject Then
+		iWait = 15
+	Else
+		iWait = 2
+	End If 
+	
+	wshShell.run "cmd /C " & chr(34) & "@echo " &  String(7,chr(7)) & chr(34),0,True
+	wshShell.Popup "Unplug drive!",iWait,"Violation!",vbCritical 
+End Sub 
+
+Function GetDriveLetter()
+If bDebug Then WScript.Echo "Getting drive letter of USB drive"
+Dim colDiskDrives, oDiskDrive, colDrives, colLDrives, oLDrive
+Dim strWQL, colPartitions, oPartition
+Dim i
+
+Set colDiskDrives = oWMI.ExecQuery("SELECT * FROM Win32_DiskDrive where InterfaceType='USB' and size > 0",,48)
+
+    For Each oDiskDrive In colDiskDrives 'Get USB Drives.  DeviceID looks like \\.\PHYSICALDRIVE1
+      strModel = oDiskDrive.Caption
+	   strWQL =  "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='" & oDiskDrive.deviceID & _
+		 "'} WHERE AssocClass = Win32_DiskDriveToDiskPartition"
+	   Set colPartitions = oWMI.ExecQuery(strWQL,,48)
+	   For Each oPartition In colPartitions
+	   	i = i + 1
+	   	'WScript.Echo "Partition: " & oPartition.DeviceID 'Device ID looks like Disk #1, Partition #0
+		 strWQL = "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" & oPartition.DeviceID & _
+		 "'} WHERE AssocClass = Win32_LogicalDiskToPartition"
+		 
+		 Set colLDrives = oWMI.ExecQuery(strWQL,,48)
+		 	For Each oLDrive In colLDrives
+		 			GetDriveLetter = oLDrive.DeviceID	'Device ID looks like E:
+			Next
+	   Next	 
+   Next
+ End Function 
+
+
+Function IsAdmin()
+	'This may not work with post XP because of UAC issues
+	Dim  strSysFolder, strFile, oFile
+	strSysFolder = fso.GetSpecialFolder(1) 'System Folder
+	strFile = strSysFolder & "\IsAdmin.txt"
+	
+	On Error Resume Next
+	set oFile = fso.CreateTextFile (strFile,True)
+	oFile.WriteLine "Delete Me"
+	oFile.Close
+	
+	If Err.Number <> 0 Then 
+		IsAdmin = False
+		'WScript.Echo "Not an admin" 
+	Else 
+		IsAdmin = True
+		'WScript.Echo "Is an admin" 
+		'Cleanup file 
+		fso.DeleteFile(strFile)
+	End If
+	
+	On Error GoTo 0
+End Function 
+
+Sub GetName 'Gets user's first and last from AD
+	Dim strLogonServer
+	strLogonServer = wshShell.ExpandEnvironmentStrings("%LOGONSERVER%")
+	If strLogonServer = strComputer  Or not Fso.FolderExists(strLogonServer & ".")  Then
+		strMyName =""
+		Exit Sub 
+	End If 
+
+	'I could bind directly using the CN from oSI, but this was already written...
+	Dim objConnection, oRS, objCommand, root, sDomain
+	Const ADS_SCOPE_SUBTREE = 2
+	Set objConnection = CreateObject("ADODB.Connection")
+	Set objCommand = CreateObject("ADODB.Command")
+	objConnection.Provider = ("ADsDSOObject")
+	objConnection.Open "Active Directory Provider"
+	objCommand.ActiveConnection = objConnection
+	
+	'Get the ADsPath for the domain to search. 
+	Set root = GetObject("LDAP://rootDSE")
+	sDomain = root.Get("defaultNamingContext")
+	
+	objCommand.CommandText = "SELECT samAccountName,description, givenname, sn FROM " & _
+	    "'LDAP://" & sdomain & "' WHERE samAccountName = '" & strNTName &  "'"
+
+	objCommand.Properties("SearchScope") = ADS_SCOPE_SUBTREE
+	Set oRS = objCommand.Execute
+	
+	'new version 2.2
+	If oRS.RecordCount = 0 Then
+	   strMyName = ""
+	Else
+
+	    strMyName = " (" & oRS("givenName").value & space(1) & oRS("sn").value 
+
+	    If IsArray(oRS("Description")) Then 
+	    	Dim tArray
+	    	tArray = oRS("Description")
+	    	strDescription = tArray(0)
+	    Else
+			If Len(oRS("Description"))>0 Then
+				strDescription = oRS("Description")	
+			End If
+		End If 
+	End If 
+	
+	If Len(strDescription) > 0 Then 
+		strMyName = strMyName & ", " & strDescription & ")"
+	Else
+		strMyName = strMyName & ")"
+	End If 
+	
+	strMyCSVName  =  Mid(strMyName,3,Len(strMyName)-3)
+	
+	Set root = Nothing
+	Set oRS = Nothing
+	Set objCommand = Nothing
+	Set objConnection = Nothing
+	
+End Sub
+
+Sub AddExclude(strComputer)
+	For i = 0 To dExceptions.Count -1 ' Iterate the array.
+		If (lcase(ExcludeNames(i)) = LCase(strComputer)) Or (lcase(ExcludeNames(i)) = LCase(strNTName)) Then
+			ReDim Preserve aIgnoreList(UBound(aIgnoreList)+1)
+	    	aIgnoreList(UBound(aIgnoreList)) = PNPIDs(i) 
+	    	If bDebug Then WScript.echo StrComputer & " is excluded from detecting " & PNPIDs(i)
+	    	Exit For 
+	    End If 
+	Next
+End Sub 
+
+
+Sub CheckService(strServiceName,strServiceDescription)
+	Dim colServices, objService
+	Dim iServicePresent : iServicePresent = 0
+	Set oWMI = GetObject("winmgmts:" _	
+		& "{impersonationLevel=impersonate}!\\" & strComputer& "\root\cimv2")
+	If Err.Number <> 0 Then 
+		strServiceMessage =  "Error connecting to WMI on " & strComputer & ". " & Err.Description
+		bServiceInstalled = False
+		Exit Sub 
+	End If 
+		
+	Set colServices = oWMI.ExecQuery ("SELECT State FROM Win32_Service where name ='" & strServiceName & "'" )
+	
+	For Each objService in colServices
+		iServicePresent = colServices.count
+		strServiceMessage =  strServiceDescription & " is " & objService.State & " on " & strComputer
+	Next
+	
+	If iServicePresent = 0 Then 
+		strServiceMessage =  strServiceDescription & " is not installed on " & strComputer
+		bServiceInstalled = False
+	Else
+		bServiceInstalled = True 
+	End If 
+End Sub 
+
+
+Function IsCScript()
+    If (InStr(UCase(WScript.FullName), "CSCRIPT") <> 0) Then
+        IsCScript = True
+    Else
+        IsCScript = False
+    End If
+End Function
