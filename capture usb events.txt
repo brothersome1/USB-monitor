@@ -1,16 +1,19 @@
 # usb_monitor.ps1
-# Monitors USB insert/remove events and writes to a log file
+# Captures USB insert/remove events and writes to JSON
 
-$logPath = "C:\USBMonitor\usb_events.csv"
-
-# Ensure log file exists
-if (!(Test-Path $logPath)) {
-    "Timestamp,EventType,DeviceID,User" | Out-File $logPath
-}
+$logPath = "C:\USBMonitor\usb_events.json"
 
 Register-WmiEvent -Query "SELECT * FROM __InstanceCreationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_USBControllerDevice'" -Action {
     $device = $Event.SourceEventArgs.NewEvent.TargetInstance.Dependent
     $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     $user = $env:USERNAME
-    "$timestamp,Inserted,$device,$user" | Out-File $logPath -Append
+
+    $event = @{
+        Timestamp = $timestamp
+        EventType = "Inserted"
+        DeviceID  = $device
+        User      = $user
+    } | ConvertTo-Json
+
+    Add-Content -Path $logPath -Value $event
 }
