@@ -1,0 +1,25 @@
+# usb_alert.py
+import smtplib
+import pandas as pd
+from email.mime.text import MIMEText
+
+LOG_PATH = r"C:\USBMonitor\usb_events.csv"
+
+def send_email(event_row):
+    msg = MIMEText(f"USB device inserted:\n\n{event_row}")
+    msg['Subject'] = "USB Monitor Alert"
+    msg['From'] = "monitor@example.com"
+    msg['To'] = "securityteam@example.com"
+
+    with smtplib.SMTP("smtp.yourmailserver.com", 587) as server:
+        server.starttls()
+        server.login("monitor@example.com", "yourpassword")
+        server.send_message(msg)
+
+def check_new_events():
+    df = pd.read_csv(LOG_PATH)
+    latest = df.tail(1).to_string(index=False)
+    send_email(latest)
+
+if __name__ == "__main__":
+    check_new_events()
