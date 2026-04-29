@@ -1,0 +1,16 @@
+# anomaly_usb.py
+import pandas as pd
+from sklearn.ensemble import IsolationForest
+
+df = pd.read_json(r"C:\USBMonitor\usb_events.json", lines=True)
+
+# Feature engineering: convert timestamp to hour of day
+df['Hour'] = pd.to_datetime(df['Timestamp']).dt.hour
+
+# Train anomaly detector
+model = IsolationForest(contamination=0.05, random_state=42)
+df['Anomaly'] = model.fit_predict(df[['Hour']])
+
+# Flag anomalies
+alerts = df[df['Anomaly'] == -1]
+print("Suspicious USB events:\n", alerts)
